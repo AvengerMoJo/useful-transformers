@@ -1,6 +1,10 @@
+import os
 from flask import Flask, request, jsonify
 import numpy as np
 from .whisper import decode_pcm
+
+MODEL = os.environ.get('WHISPER_MODEL', 'base')
+SRC_LANG = os.environ.get('WHISPER_SRC_LANG', 'zh')
 
 app = Flask(__name__)
 
@@ -16,7 +20,7 @@ def consume_buffer():
     return jsonify(result=result)
 
 def buffer_decode(array):
-    text = decode_pcm(array, "tiny.en")
+    text = decode_pcm(array, MODEL, task='transcribe', src_lang=SRC_LANG)
     return {'message': text}
 
 if __name__ == '__main__':

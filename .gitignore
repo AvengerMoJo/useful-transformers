@@ -32,3 +32,6 @@
 *.app
 build_cpu/
 __pycache__/
+
+# generated whisper weight files
+examples/whisper/weights/*.npz
