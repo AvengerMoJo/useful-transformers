@@ -1,65 +1,25 @@
 #include "matmul.h"
 
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+
+#include "matmul_backend.h"
 
 Matmul::Matmul(int M, int K, int N, int core) : M(M), K(K), N(N) {
   K_padded = NEXT_MULTIPLE_OF_32(K);
   N_padded = NEXT_MULTIPLE_OF_16(N);
-  memset(&info, 0, sizeof(rknn_matmul_info));
-  info.M = M;
-  info.K = K_padded;
-  info.N = N_padded;
-  info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32;
-  info.B_layout = 1;
-  info.AC_layout = 1;
-  memset(&io_attr, 0, sizeof(rknn_matmul_io_attr));
-
-  int ret = 0;
-
-  ret = rknn_matmul_create(&ctx, &info, &io_attr);
-  assert(ret >= 0 && "Constructor failed");
-
-  if (core == 0)
-    ret = rknn_matmul_set_core_mask(ctx, RKNN_NPU_CORE_0);
-  else if (core == 1)
-    ret = rknn_matmul_set_core_mask(ctx, RKNN_NPU_CORE_1);
-  else if (core == 2)
-    ret = rknn_matmul_set_core_mask(ctx, RKNN_NPU_CORE_2);
-  else
-    ret = -1;
-  assert(ret >= 0 && "Set core mask failed");
-
-  assert(io_attr.A.n_dims == 3 && "Expected A to be 3 dimensional");
-  assert(io_attr.B.n_dims == 4 && "Expected B to be 4 dimensional");
-  assert(io_attr.C.n_dims == 3 && "Expected C to be 3 dimensional");
-
-  assert(io_attr.A.dims[2] == 8 && io_attr.A.dims[1] == M &&
-         io_attr.A.dims[0] == K_padded / 8 && "A dims are not [K/8, M, 8]");
-  assert(io_attr.B.dims[3] == 32 && io_attr.B.dims[2] == 16 &&
-         io_attr.B.dims[1] == K_padded / 32 &&
-         io_attr.B.dims[0] == N_padded / 16 &&
-         "B dims are not [N/16, K/32, 16, 32]");
-  assert(io_attr.C.dims[2] == 4 && io_attr.C.dims[1] == M &&
-         io_attr.C.dims[0] == N_padded / 4 && "C dims are not [N/4, M, 4]");
-
-  A = rknn_create_mem(ctx, io_attr.A.size);
-  assert(A != NULL && "A allocation failed");
-  B = rknn_create_mem(ctx, io_attr.B.size);
-  assert(B != NULL && "B allocation failed");
-  C = rknn_create_mem(ctx, io_attr.C.size);
-  assert(C != NULL && "C allocation failed");
-
+  backend = create_matmul_backend();
+  backend->allocate(this, core);
   zero_A();
   zero_B();
 }
 
 Matmul::~Matmul() {
-  rknn_destroy_mem(ctx, A);
-  rknn_destroy_mem(ctx, B);
-  rknn_destroy_mem(ctx, C);
-
-  rknn_matmul_destroy(ctx);
+  backend->deallocate(this);
+  delete backend;
+  backend = nullptr;
 }
 
 void Matmul::zero_A() { memset(get_A_ptr(), 0, sizeof(__fp16) * M * K_padded); }
@@ -104,14 +64,25 @@ void Matmul::copy_C_to_B(Matmul* other, Slice slice) {
   }
 }
 
-void Matmul::call() {
-  int ret;
-  ret = rknn_matmul_set_io_mem(ctx, A, &io_attr.A);
-  assert(ret >= 0 && "Setting A input failed");
-  ret = rknn_matmul_set_io_mem(ctx, B, &io_attr.B);
-  assert(ret >= 0 && "Setting B input failed");
-  ret = rknn_matmul_set_io_mem(ctx, C, &io_attr.C);
-  assert(ret >= 0 && "Setting C ouput failed");
-  ret = rknn_matmul_run(ctx);
-  assert(ret >= 0 && "matmul launch failed\n");
+void Matmul::call() { backend->call(this); }
+
+MatmulBackend *create_matmul_backend() {
+  const char *env = getenv("USEFUL_TRANSFORMERS_BACKEND");
+#ifdef HAVE_RKNN
+  const char *requested = (env != nullptr) ? env : "rknn";
+#else
+  const char *requested = (env != nullptr) ? env : "cpu";
+#endif
+
+  if (strcmp(requested, "rknn") == 0) {
+#ifdef HAVE_RKNN
+    return create_rknn_backend();
+#else
+    fprintf(stderr,
+            "WARNING: rknn matmul backend requested, but this build has no "
+            "RKNN support; falling back to cpu\n");
+    return create_cpu_backend();
+#endif
+  }
+  return create_cpu_backend();
 }

@@ -7,8 +7,12 @@ from .tokenizer import get_tokenizer
 
 import ctypes
 # Load this here explicitly into the process, so importing pybind_whisper
-# doesn't have to search for librknnrt.so.
-_ = ctypes.cdll.LoadLibrary(os.path.join(os.path.dirname(__file__), 'librknnrt.so'))
+# doesn't have to search for librknnrt.so (RKNN backend only).
+_backend = os.environ.get('USEFUL_TRANSFORMERS_BACKEND', None)
+_rknn_path = os.path.join(os.path.dirname(__file__), 'librknnrt.so')
+_use_rknn_backend = _backend != 'cpu' and os.path.exists(_rknn_path)
+if _use_rknn_backend:
+    _ = ctypes.cdll.LoadLibrary(_rknn_path)
 
 from .pybind_whisper import WhisperModel as CWhisperModel
 
@@ -136,8 +140,9 @@ class WhisperModel(object):
         self.multilingual = not model.endswith('.en')
         self.tokenizer = get_tokenizer(multilingual=self.multilingual)
         self.lang_dict = dict(zip(self.tokenizer.all_language_codes, self.tokenizer.all_language_tokens))
-        assert os.sched_getaffinity(os.getpid()) == set([4, 5, 6, 7]), (
-            f'Should be run with taskset -c4-7')
+        if _use_rknn_backend:
+            assert os.sched_getaffinity(os.getpid()) == set([4, 5, 6, 7]), (
+                f'Should be run with taskset -c4-7')
 
         assets_dir = os.path.join(os.path.dirname(__file__), "assets")
         self.N_FFT = 400

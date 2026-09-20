@@ -1,11 +1,17 @@
 #include "layernorm.h"
 
+#ifdef NEON_OPT
 #include <arm_neon.h>
+#endif
+
+#include <cassert>
+#include <cmath>
 
 void layernorm_A(Matmul *x, int rows, int cols,
                  const std::vector<__fp16> &gamma,
                  const std::vector<__fp16> &beta, __fp16 eps) {
   assert(!(cols % 8));
+#ifdef NEON_OPT
 #pragma omp parallel for
   for (int i = 0; i < rows; i++) {
     // Calculate mean.
@@ -50,4 +56,44 @@ void layernorm_A(Matmul *x, int rows, int cols,
       vst1q_f16(input_ptr + offset, val);
     }
   }
+#else
+#pragma omp parallel for
+  for (int i = 0; i < rows; i++) {
+    __fp16 *input_ptr = x->get_A_ptr() + 8 * i;
+    float mean_f32 = 0.0;
+    for (int j = 0; j < cols; j += 8) {
+      int offset = rows * j;
+      for (int lane = 0; lane < 8; ++lane) {
+        mean_f32 += (float)input_ptr[offset + lane];
+      }
+    }
+    mean_f32 /= cols;
+    __fp16 mean = (__fp16)mean_f32;
+
+    float msd_f32 = 0.0;
+    for (int j = 0; j < cols; j += 8) {
+      int offset = rows * j;
+      for (int lane = 0; lane < 8; ++lane) {
+        float val = (float)input_ptr[offset + lane] - (float)mean;
+        msd_f32 += val * val;
+      }
+    }
+    float denom_single = msd_f32 / (float)(cols - 1);
+    denom_single = std::sqrt(denom_single + (float)eps);
+    __fp16 denom = (__fp16)denom_single;
+
+    for (int j = 0; j < cols; j += 8) {
+      int offset = rows * j;
+      for (int lane = 0; lane < 8; ++lane) {
+        int col = j + lane;
+        __fp16 val = input_ptr[offset + lane];
+        val = (__fp16)((float)val - (float)mean);
+        val = (__fp16)((float)val / (float)denom);
+        val = (__fp16)((float)val * (float)gamma[col]);
+        val = (__fp16)((float)val + (float)beta[col]);
+        input_ptr[offset + lane] = val;
+      }
+    }
+  }
+#endif
 }

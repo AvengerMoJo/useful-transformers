@@ -1,8 +1,11 @@
 #include "softmax.h"
 
+#ifdef NEON_OPT
 #include <arm_neon.h>
+#endif
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "misc.h"
@@ -16,7 +19,7 @@ struct _exp_lut {
   _exp_lut() {
     for (int i = 0; i < LUT_SIZE; ++i) {
       uint16_t x = i | 0x8000;
-      __fp16 y = std::exp(to_f16(x));
+      __fp16 y = (__fp16)std::exp((float)to_f16(x));
       lut[i] = to_u16(y);
     }
   }
@@ -31,6 +34,7 @@ struct _exp_lut {
 }  // namespace
 
 void copy_C_to_fp16(Matmul* src, __fp16* dst, int rows, int cols) {
+#ifdef NEON_OPT
   float32_t* C = src->get_C_ptr();
   int i = 0;
   for (i = 0; i < cols - (cols % 4); i += 4) {
@@ -52,10 +56,19 @@ void copy_C_to_fp16(Matmul* src, __fp16* dst, int rows, int cols) {
       }
     }
   }
+#else
+  float* C = src->get_C_ptr();
+  for (int i = 0; i < cols; ++i) {
+    for (int j = 0; j < rows; ++j) {
+      dst[j * cols + i] = (__fp16)C[((i / 4) * src->M + j) * 4 + (i % 4)];
+    }
+  }
+#endif
 }
 
 __fp16 compute_max(__fp16* src, int N) {
   __fp16 max = src[0];
+#ifdef NEON_OPT
   int i;
   for (i = 0; i < N - (N % 8); i += 8) {
     max = std::max(max, vmaxnmvq_f16(vld1q_f16(src + i)));
@@ -65,10 +78,16 @@ __fp16 compute_max(__fp16* src, int N) {
   for (; i < N; ++i) {
     max = std::max(max, src[i]);
   }
+#else
+  for (int i = 1; i < N; ++i) {
+    max = std::max(max, src[i]);
+  }
+#endif
   return max;
 }
 
 void log_softmax(__fp16* src, int N, __fp16 max) {
+#ifdef NEON_OPT
   int i;
   float sum = 0.0;
   for (i = 0; i < N - (N % 8); i += 8) {
@@ -100,12 +119,24 @@ void log_softmax(__fp16* src, int N, __fp16 max) {
       src[i + rem_i] -= subtrahend;
     }
   }
+#else
+  float sum = 0.0;
+  for (int i = 0; i < N; ++i) {
+    sum += exp_lut(src[i] - max);
+  }
+  float log_sum = std::log(sum);
+  __fp16 subtrahend = log_sum + max;
+  for (int i = 0; i < N; ++i) {
+    src[i] -= subtrahend;
+  }
+#endif
 }
 
 void softmax_C_to_A(Matmul* src, Matmul* dst, int rows, int cols) {
   std::vector<float> row_max(rows, -std::numeric_limits<float>::infinity());
-  float32_t* C = src->get_C_ptr();
-  float16_t* A = dst->get_A_ptr();
+  float* C = src->get_C_ptr();
+  __fp16* A = dst->get_A_ptr();
+#ifdef NEON_OPT
   int i = 0;
   for (i = 0; i < cols - (cols % 4); i += 4) {
     // src's actual number of rows (src->M) times 4 is the base for a block of
@@ -175,4 +206,28 @@ void softmax_C_to_A(Matmul* src, Matmul* dst, int rows, int cols) {
       }
     }
   }
+#else
+  for (int i = 0; i < cols; ++i) {
+    for (int j = 0; j < rows; ++j) {
+      float v = C[((i / 4) * src->M + j) * 4 + (i % 4)];
+      row_max[j] = std::max(row_max[j], v);
+    }
+  }
+
+  std::vector<float> row_exp_sum(rows, 0.0);
+  for (int i = 0; i < cols; ++i) {
+    for (int j = 0; j < rows; ++j) {
+      float v = C[((i / 4) * src->M + j) * 4 + (i % 4)] - row_max[j];
+      __fp16 elem = exp_lut((__fp16)v);
+      row_exp_sum[j] += (float)elem;
+      A[((i / 8) * dst->M + j) * 8 + (i % 8)] = elem;
+    }
+  }
+
+  for (int i = 0; i < cols; ++i) {
+    for (int j = 0; j < rows; ++j) {
+      A[((i / 8) * dst->M + j) * 8 + (i % 8)] /= (__fp16)row_exp_sum[j];
+    }
+  }
+#endif
 }

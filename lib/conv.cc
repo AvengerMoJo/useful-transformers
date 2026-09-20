@@ -1,6 +1,8 @@
 #include "conv.h"
 
+#ifdef NEON_OPT
 #include <arm_neon.h>
+#endif
 
 #include <cstring>
 #include <vector>
@@ -11,6 +13,7 @@ namespace {
 
 void sum_results_add_bias(float* result, float* out0, float* out1, float* out2,
                           __fp16* bias, int out_width, int out_depth) {
+#ifdef NEON_OPT
   float* result_ptr = result;
   float* out_ptr0 = out0;
   float* out_ptr1 = out1;
@@ -35,6 +38,19 @@ void sum_results_add_bias(float* result, float* out0, float* out1, float* out2,
       out_ptr2 += 4;
     }
   }
+#else
+  // Mirrors the NEON pointer walk: within each 4-wide output depth block, the
+  // out_width elements of each channel are summed from last to first.
+  for (int i = 0; i < out_depth; i += 4) {
+    for (int p = 0; p < out_width; ++p) {
+      int idx = (i / 4) * out_width * 4 + p * 4;
+      for (int lane = 0; lane < 4; ++lane) {
+        result[idx + lane] = out0[idx + lane] + out1[idx + lane] +
+                             out2[idx + lane] + (float)bias[i + lane];
+      }
+    }
+  }
+#endif
 }
 
 }  // namespace.

@@ -1,6 +1,10 @@
 #ifndef _LIB_MISC_H_
 #define _LIB_MISC_H_
 
+#include <cstdint>
+
+#include "fp16.h"
+
 union u16_f16 {
   uint16_t u;
   __fp16 f;

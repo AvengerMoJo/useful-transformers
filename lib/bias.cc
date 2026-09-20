@@ -1,6 +1,8 @@
 #include "bias.h"
 
+#ifdef NEON_OPT
 #include <arm_neon.h>
+#endif
 
 #include <cassert>
 #include <cmath>
@@ -38,6 +40,7 @@ struct _gelu_lut {
 void bias_and_gelu(float* src, __fp16* dst, const std::vector<__fp16>& bias,
                    int rows, int cols, int src_rows_padded,
                    int dst_rows_padded) {
+#ifdef NEON_OPT
   int i = 0;
   for (i = 0; i < cols - (cols % 4); i += 4) {
     // src's actual number of rows (src->M) times 4 is the base for a block of
@@ -68,6 +71,16 @@ void bias_and_gelu(float* src, __fp16* dst, const std::vector<__fp16>& bias,
       }
     }
   }
+#else
+  for (int i = 0; i < cols; ++i) {
+    for (int j = 0; j < rows; ++j) {
+      float v = src[((i / 4) * src_rows_padded + j) * 4 + (i % 4)];
+      __fp16 elem = (__fp16)v + bias[i];
+      elem = gelu_lut(elem);
+      dst[((i / 8) * dst_rows_padded + j) * 8 + (i % 8)] = elem;
+    }
+  }
+#endif
 }
 
 void bias_and_gelu_C_to_A(Matmul* src, Matmul* dst,
@@ -83,6 +96,7 @@ void bias_and_gelu(float* src, __fp16* dst, const std::vector<__fp16>& bias,
 
 void bias_and_scale_C(Matmul* dst, const std::vector<__fp16>& bias, float scale,
                       int rows, int cols) {
+#ifdef NEON_OPT
   float32_t* C = dst->get_C_ptr();
   int i = 0;
   for (i = 0; i < cols - (cols % 4); i += 4) {
@@ -105,6 +119,15 @@ void bias_and_scale_C(Matmul* dst, const std::vector<__fp16>& bias, float scale,
       }
     }
   }
+#else
+  float* C = dst->get_C_ptr();
+  for (int i = 0; i < cols; ++i) {
+    for (int j = 0; j < rows; ++j) {
+      int idx = ((i / 4) * dst->M + j) * 4 + (i % 4);
+      C[idx] = (C[idx] + (float)bias[i]) * scale;
+    }
+  }
+#endif
 }
 
 void add_residual_C_to_A(Matmul* src, Matmul* dst, std::vector<__fp16> residual,
@@ -112,6 +135,7 @@ void add_residual_C_to_A(Matmul* src, Matmul* dst, std::vector<__fp16> residual,
   assert(cols % 8 == 0);
   float* src_ptr = src->get_C_ptr();
   __fp16* dst_ptr = dst->get_A_ptr();
+#ifdef NEON_OPT
   for (int i = 0; i < rows; i++) {
     for (int j = 0; j < cols; j += 8) {
       int dst_idx = j * rows + i * 8;
@@ -124,6 +148,21 @@ void add_residual_C_to_A(Matmul* src, Matmul* dst, std::vector<__fp16> residual,
       vst1q_f16(&dst_ptr[dst_idx], out);
     }
   }
+#else
+  for (int i = 0; i < rows; i++) {
+    for (int j = 0; j < cols; j += 8) {
+      int dst_idx = j * rows + i * 8;
+      int src_idx = j * rows + i * 4;
+      for (int lane = 0; lane < 4; ++lane) {
+        dst_ptr[dst_idx + lane] =
+            (__fp16)src_ptr[src_idx + lane] + residual[dst_idx + lane];
+        dst_ptr[dst_idx + 4 + lane] =
+            (__fp16)src_ptr[src_idx + rows * 4 + lane] +
+            residual[dst_idx + 4 + lane];
+      }
+    }
+  }
+#endif
 }
 
 void bias_and_add_residual_C(Matmul* src, std::vector<__fp16>& dst,
@@ -131,6 +170,7 @@ void bias_and_add_residual_C(Matmul* src, std::vector<__fp16>& dst,
                              std::vector<__fp16> bias, int rows, int cols) {
   assert(cols % 8 == 0);
   float* src_ptr = src->get_C_ptr();
+#ifdef NEON_OPT
   for (int i = 0; i < rows; i++) {
     for (int j = 0; j < cols; j += 8) {
       int dst_idx = j * rows + i * 8;
@@ -145,4 +185,20 @@ void bias_and_add_residual_C(Matmul* src, std::vector<__fp16>& dst,
       vst1q_f16(&dst[i * cols + j], out);
     }
   }
+#else
+  for (int i = 0; i < rows; i++) {
+    for (int j = 0; j < cols; j += 8) {
+      int dst_idx = j * rows + i * 8;
+      int src_idx = j * rows + i * 4;
+      for (int lane = 0; lane < 4; ++lane) {
+        dst[i * cols + j + lane] = (__fp16)src_ptr[src_idx + lane] +
+                                   residual[dst_idx + lane] + bias[j + lane];
+        dst[i * cols + j + 4 + lane] = (__fp16)src_ptr[src_idx + rows * 4 +
+                                                       lane] +
+                                       residual[dst_idx + 4 + lane] +
+                                       bias[j + 4 + lane];
+      }
+    }
+  }
+#endif
 }

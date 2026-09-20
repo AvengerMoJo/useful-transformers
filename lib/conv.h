@@ -1,8 +1,6 @@
 #ifndef _LIB_CONV_H_
 #define _LIB_CONV_H_
 
-#include <arm_neon.h>
-
 #include <vector>
 
 #include "matmul.h"
